@@ -1,0 +1,6 @@
+# F5-TTS sidecar dependencies (installed only into tools/f5tts_env).
+# PyTorch and Torchaudio are installed separately from the CUDA wheel index.
+f5-tts==1.1.22
+soundfile==0.14.0
+scipy==1.18.0
+transformers==5.14.1
