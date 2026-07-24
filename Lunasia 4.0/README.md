@@ -7,10 +7,14 @@
 ### Windows用户（推荐）
 1. 确保已安装Python 3.8+
 2. 双击 `启动露尼西亚.bat` 文件
-3. 等待自动安装依赖包
+3. 首次运行会自动创建项目专用环境并在线安装依赖；以后直接双击即可
 
-首次使用本地 F5-TTS 时，完整版启动脚本还会创建隔离的
-`tools/f5tts_env` 环境并检查 FFmpeg。该环境体积较大，不会安装到主程序 Python。
+用户无需学习或手动激活虚拟环境。启动器将环境保存在 `tools/app_env`，不会污染
+系统 Python。主启动流程不会安装可选的 F5-TTS 或 FFmpeg，因此在虚拟机、无显卡
+电脑和精简版 Windows 上也能先进入程序。
+
+需要本地 F5-TTS 时，再单独双击 `安装F5-TTS.bat`。它会创建隔离的
+`tools/f5tts_env` 环境，并在找不到 FFmpeg 时下载项目内便携版。
 
 ### 其他系统用户
 1. 安装Python 3.8+
@@ -139,19 +143,24 @@ pip install -r requirements.txt
 #### Windows系统
 - **完整版启动**：双击 `启动露尼西亚.bat`
   - 自动检查Python环境
-  - 自动安装依赖包
+  - 自动创建项目专用环境并按需安装依赖包
   - 提供详细的错误诊断
   - 适合首次使用或环境配置
 
 - **快速启动**：双击 `快速启动.bat`
-  - 直接启动程序
+  - 使用已准备好的项目环境直接启动
   - 启动速度更快
   - 适合日常使用
 
+- **可选本地语音**：双击 `安装F5-TTS.bat`
+  - 单独安装 F5-TTS、PyTorch 和 FFmpeg
+  - 下载体积较大，但安装失败不会影响主程序
+
 #### 启动脚本特性
-- ✅ 支持中文显示（UTF-8编码）
 - ✅ 自动检查Python环境
-- ✅ 自动安装依赖包
+- ✅ 自动隔离并安装依赖包
+- ✅ 依赖未变化时跳过重复安装
+- ✅ BAT 入口只使用 ASCII，兼容不同 Windows 系统代码页
 - ✅ 友好的错误提示
 - ✅ 异常退出时的诊断信息
 
@@ -230,23 +239,25 @@ python main.py
 ## 本地 F5-TTS
 
 F5-TTS 运行在独立 Sidecar 中，主程序的 `requirements.txt` 不安装
-PyTorch/F5-TTS。首次安装可直接双击 `启动露尼西亚.bat`，或在 PowerShell 执行：
+PyTorch/F5-TTS，也不会拖慢主程序的首次启动。需要此可选功能时，双击
+`安装F5-TTS.bat`，或在 PowerShell 执行：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\tools\setup_f5tts.ps1
+.\tools\install_f5tts.ps1
 ```
 
 需要彻底重建环境时：
 
 ```powershell
-.\tools\setup_f5tts.ps1 -Rebuild
+.\tools\install_f5tts.ps1 -Rebuild
 ```
 
 设置中选择“F5-TTS（本地 Sidecar）”并启用语音合成。参考音频文稿可以留空：
 Sidecar 会使用 Whisper 自动识别参考音频，再进行声音克隆。自动识别使用
 SoundFile 解码 PCM，不依赖 TorchCodec 的 FFmpeg shared DLL；FFmpeg CLI 仅用于
-参考音频裁剪和格式预处理。
+参考音频裁剪和格式预处理。安装器优先复用现有 FFmpeg；找不到时会下载到
+`tools/ffmpeg`，不要求系统提供 WinGet 或管理员权限。
 
 推荐使用 Python 3.11；安装脚本在其不可用时会回退到 Python 3.13。CUDA 运行时
 锁定为匹配的 PyTorch/Torchaudio `2.11.0+cu126`。详细安装、生命周期和故障排查
