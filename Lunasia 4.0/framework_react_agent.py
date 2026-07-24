@@ -238,6 +238,15 @@ class FrameworkReActAgent:
             parts.append(str(collected_info.get(key, "")))
         return "\n".join(parts).lower()
 
+    @staticmethod
+    def _is_todo_request(text: str) -> bool:
+        """识别应交给主 Agent 的 TodoService 执行的待办/提醒请求。"""
+        normalized = str(text or "").lower()
+        markers = [
+            "待办", "提醒", "分钟后", "小时后", "task_", "todo", "remind",
+        ]
+        return any(marker.lower() in normalized for marker in markers)
+
     def _has_todo_failure_signal(self, collected_info: Dict[str, str]) -> bool:
         """判断是否存在待办执行失败信号。"""
         text = self._join_collected_text(collected_info)
@@ -600,6 +609,18 @@ class FrameworkReActAgent:
         Returns:
             框架列表 [{"description": "步骤描述", "action": "action_type", "params": {...}}]
         """
+        # TodoService 是待办与邮件提醒的唯一执行入口，不是 MCP 工具。
+        # 在调用规划模型前确定性路由，避免模型虚构 email_scheduler 等工具。
+        if self._is_todo_request(user_input):
+            print("[框架路由] 待办/提醒请求直接交给主Agent的 TodoService")
+            return [
+                {
+                    "description": "通过待办服务执行提醒请求",
+                    "action": "pass_to_main_agent",
+                    "params": {},
+                }
+            ]
+
         planner_context = self._build_planner_context(user_input, search_intent_hint)
         self._last_planner_context = planner_context
 
@@ -1239,7 +1260,7 @@ class FrameworkReActAgent:
                     return "❌ 未指定子任务内容"
                 # 待办提醒类任务优先传递用户原句，避免改写污染时间语义与事件标题
                 subtask_text = str(subtask).strip()
-                is_todo_request = any(x in subtask_text for x in ["提醒", "休息提醒", "定时提醒"]) or "remind" in subtask_text.lower()
+                is_todo_request = self._is_todo_request(subtask_text)
                 if is_todo_request:
                     subtask = user_input
                 print(f"📤 [子任务委托] 交给主Agent执行: {subtask[:60]}...")
@@ -1272,12 +1293,7 @@ class FrameworkReActAgent:
                     # 直接调用主Agent的对话处理流程，并显式跳过框架以避免死循环。
                     # 默认抑制工具路由，避免重复打开浏览器/应用；
                     # 但待办/提醒类请求必须放开工具路由，确保真正执行 TodoService（创建/修改/取消）。
-                    todo_keywords = [
-                        "待办", "提醒", "改为", "修改提醒", "取消提醒", "删除提醒",
-                        "分钟后", "小时后", "发到", "task_", "todo", "remind",
-                    ]
-                    lower_user_input = str(user_input or "").lower()
-                    is_todo_request = any(k.lower() in lower_user_input for k in todo_keywords)
+                    is_todo_request = self._is_todo_request(user_input)
                     allow_tool_routing = is_todo_request
                     # 幂等保护：若前序步骤已有待办执行证据，pass_to_main_agent 只负责总结，不再二次执行工具路由。
                     if allow_tool_routing and collected_info and self._has_todo_execution_evidence(collected_info):

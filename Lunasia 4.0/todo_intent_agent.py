@@ -21,8 +21,17 @@ class TodoIntentAgent:
         self.config = config
 
     def detect(self, user_input: str) -> Dict[str, Any]:
-        model = (self.config.get("search_intent_model", "") or "").strip() or None
-        result = self.llm_client_getter(model)
+        raw_model = self.config.get("search_intent_model")
+        try:
+            # 新配置使用 ModelSpec 字典；按配置键路由可完整保留 backend/provider/thinking。
+            result = self.llm_client_getter(config_key="search_intent_model")
+        except TypeError:
+            # 兼容只接受位置参数的旧回调和独立测试桩。
+            if isinstance(raw_model, dict):
+                model_hint = str(raw_model.get("model_id", "") or "").strip() or None
+            else:
+                model_hint = str(raw_model or "").strip() or None
+            result = self.llm_client_getter(model_hint)
         if not result:
             return {
                 "intent": "unavailable",

@@ -63,6 +63,11 @@ class TodoStore:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_task_ops_task ON task_ops(task_id)")
             self._conn.commit()
 
+    def close(self) -> None:
+        """释放 SQLite 连接。"""
+        with self._lock:
+            self._conn.close()
+
     @staticmethod
     def _now_iso() -> str:
         return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -117,6 +122,22 @@ class TodoStore:
                 "SELECT * FROM tasks WHERE status = 'scheduled' ORDER BY trigger_time ASC"
             ).fetchall()
             return [self._row_to_dict(r) for r in rows]
+
+    def recover_interrupted_sending(self) -> int:
+        """应用重启时将异常中断的 sending 任务恢复为可重试状态。"""
+        with self._lock:
+            now = self._now_iso()
+            cur = self._conn.execute(
+                """
+                UPDATE tasks
+                SET status='scheduled', trigger_time=?, updated_at=?,
+                    last_error='应用在发送过程中退出，已自动恢复'
+                WHERE status='sending'
+                """,
+                (now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     def list_scheduled_matching(self, keyword: str) -> List[Dict[str, Any]]:
         kw = (keyword or "").strip()

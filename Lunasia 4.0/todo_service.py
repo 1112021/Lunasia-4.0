@@ -54,6 +54,10 @@ class TodoService:
         self.memory_event_callback = memory_event_callback
         self.pending_confirmation: Optional[Dict[str, Any]] = None
 
+        recovered = self.store.recover_interrupted_sending()
+        if recovered:
+            print(f"🔁 [Todo] 已恢复 {recovered} 个发送中断的提醒任务")
+
         # 启动时恢复调度
         for task in self.store.list_scheduled():
             self.scheduler.schedule(task["task_id"], task["trigger_time"])
@@ -67,6 +71,11 @@ class TodoService:
         try:
             if getattr(self, "scheduler", None):
                 self.scheduler.stop()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "store", None):
+                self.store.close()
         except Exception:
             pass
 
@@ -561,7 +570,11 @@ class TodoService:
             f"📨 [Todo] 开始发送提醒邮件: {task_id} | event={task.get('event_title', '')} | to={task.get('recipient_email', '')}"
         )
 
-        ok, msg = self.comm_agent.send_task_email(task)
+        try:
+            ok, msg = self.comm_agent.send_task_email(task)
+        except Exception as e:
+            ok, msg = False, f"邮件发送线程异常: {e}"
+            print(f"❌ [Todo] 邮件发送线程异常，转入重试: {task_id} | error={e}")
         if ok:
             self.store.mark_sent(task_id)
             self.store.add_op_log(task_id, "send_success", "定时发送成功")

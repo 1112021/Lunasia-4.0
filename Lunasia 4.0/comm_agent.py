@@ -34,27 +34,47 @@ class CommAgent:
         邮件正文统一使用对话类模型（简短/生动均如此）。
         推理模型常出现 content 空或输出推理过程，不适合直接作邮件正文。
         """
-        m = (self.config.get("todo_email_model", "") or "").strip()
-        if not m:
-            m = (self.config.get("selected_model", "deepseek-v4-flash") or "").strip()
-        ml = m.lower() if isinstance(m, str) else ""
+        m = self.config.get("todo_email_model") or self.config.get(
+            "selected_model", "deepseek-v4-flash"
+        )
         if isinstance(m, dict):
             from llm_spec import normalize_spec
 
             spec = normalize_spec(m, self.config)
             if spec.thinking == "enabled" or "reasoner" in spec.model_id.lower():
                 print(
-                    f"📧 [TodoMail] model_override: {spec.display_name()} -> "
+                    f"[TodoMail] model_override: {spec.display_name()} -> "
                     "deepseek-v4-flash（非思考）"
                 )
                 return "deepseek-v4-flash"
             return spec.model_id
+        m = str(m or "").strip()
+        ml = m.lower()
         if "reasoner" in ml or "thinking" in ml:
             print(
-                f"📧 [TodoMail] model_override: {m} -> deepseek-v4-flash（邮件正文固定使用对话模型）"
+                f"[TodoMail] model_override: {m} -> deepseek-v4-flash（邮件正文固定使用对话模型）"
             )
             return "deepseek-v4-flash"
         return m or "deepseek-v4-flash"
+
+    def _get_email_body_client(self):
+        """按 ModelSpec 配置路由邮件模型，并兼容旧位置参数回调。"""
+        raw_todo_model = self.config.get("todo_email_model")
+        config_key = "todo_email_model" if raw_todo_model else "selected_model"
+        model = self._resolve_email_body_model()
+
+        raw_model = raw_todo_model or self.config.get("selected_model")
+        if isinstance(raw_model, dict):
+            from llm_spec import normalize_spec
+
+            spec = normalize_spec(raw_model, self.config)
+            if spec.thinking == "enabled" or "reasoner" in spec.model_id.lower():
+                return self.llm_client_getter(model)
+
+        try:
+            return self.llm_client_getter(config_key=config_key)
+        except TypeError:
+            return self.llm_client_getter(model)
 
     def _generate_email_body(self, task: Dict[str, Any]) -> str:
         """生成邮件正文。优先走 LLM，失败则回退模板。"""
@@ -121,10 +141,9 @@ class CommAgent:
                 return f"已到提醒时间：请处理「{event}」（你设定为{delta_minutes}分钟后提醒）。"
             return f"提醒：{meeting_time_pretty} 的「{event}」请及时处理。"
 
-        model = self._resolve_email_body_model()
-        result = self.llm_client_getter(model or None)
+        result = self._get_email_body_client()
         if not result:
-            print(f"📧 [TodoMail] body_source=fallback | style={email_style} | reason=llm_client_unavailable")
+            print(f"[TodoMail] body_source=fallback | style={email_style} | reason=llm_client_unavailable")
             return _fallback_text()
         client, model = result
         try:
@@ -141,12 +160,12 @@ class CommAgent:
             message = resp.choices[0].message
             content = (message.content or "").strip()
             if content:
-                print(f"📧 [TodoMail] body_source=llm | style={email_style} | model={model}")
+                print(f"[TodoMail] body_source=llm | style={email_style} | model={model}")
                 return content
-            print(f"📧 [TodoMail] body_source=fallback | style={email_style} | reason=llm_empty_response | model={model}")
+            print(f"[TodoMail] body_source=fallback | style={email_style} | reason=llm_empty_response | model={model}")
             return _fallback_text()
         except Exception as e:
-            print(f"📧 [TodoMail] body_source=fallback | style={email_style} | reason=llm_exception:{e} | model={model}")
+            print(f"[TodoMail] body_source=fallback | style={email_style} | reason=llm_exception:{e} | model={model}")
             return _fallback_text()
 
     def _build_subject(self, task: Dict[str, Any]) -> str:
@@ -167,23 +186,26 @@ class CommAgent:
         """发送任务邮件。"""
         smtp_host = self.config.get("smtp_host", "smtp.qq.com")
         smtp_port = int(self.config.get("smtp_port", 465))
-        smtp_user = self.config.get("smtp_username", "").strip()
-        smtp_password = self.config.get("smtp_password", "").strip()
-        recipient = task["recipient_email"]
+        smtp_user = str(self.config.get("smtp_username", "") or "").strip()
+        smtp_password = str(self.config.get("smtp_password", "") or "").strip()
+        recipient = str(task.get("recipient_email", "") or "").strip()
 
         if not smtp_user or not smtp_password:
             return False, "SMTP账号或授权码未配置"
-
-        subject = self._build_subject(task)
-        body = self._generate_email_body(task)
-
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = formataddr(("露尼西亚提醒中心", smtp_user))
-        msg["To"] = recipient
-        msg["Date"] = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0800")
+        if not recipient:
+            return False, "收件邮箱为空"
 
         try:
+            subject = self._build_subject(task)
+            body = self._generate_email_body(task)
+            msg = MIMEText(body, "plain", "utf-8")
+            msg["Subject"] = subject
+            msg["From"] = formataddr(("露尼西亚提醒中心", smtp_user))
+            msg["To"] = recipient
+            msg["Date"] = datetime.datetime.now().strftime(
+                "%a, %d %b %Y %H:%M:%S +0800"
+            )
+
             with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
                 server.login(smtp_user, smtp_password)
                 server.sendmail(smtp_user, [recipient], msg.as_string())
