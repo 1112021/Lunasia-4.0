@@ -45,8 +45,110 @@ def _today_label() -> str:
     return date.today().isoformat()
 
 
-def _get_llm(base_agent, config_key: str = "search_intent_model", model: Optional[str] = None):
-    return base_agent._get_llm_client(model=model, config_key=config_key)
+def _llm_text_call(
+    base_agent,
+    config_key: str,
+    messages: List[dict],
+    *,
+    max_tokens: int = 512,
+    temperature: float = 0.1,
+    task_label: str = "",
+) -> str:
+    from llm_router import chat_completion
+
+    text = chat_completion(
+        base_agent.config,
+        config_key=config_key,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        task_label=task_label or config_key,
+    )
+    return (text or "").strip()
+
+
+def _parse_json_object(text: str) -> Dict[str, Any]:
+    if not text or not text.strip():
+        raise ValueError("empty response")
+    raw = text.strip()
+    if "```json" in raw:
+        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in raw:
+        raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+    raw = re.sub(r"^```\w*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    if start >= 0:
+        depth = 0
+        for i in range(start, len(raw)):
+            ch = raw[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    data = json.loads(raw[start : i + 1])
+                    if isinstance(data, dict):
+                        return data
+    raise json.JSONDecodeError("no JSON object found", raw, 0)
+
+
+def _extract_search_subject(user_input: str) -> str:
+    text = (user_input or "").strip()
+    if not text:
+        return ""
+    patterns = (
+        r"^(?:请)?(?:结合|使用|通过|借助)?(?:联网)?(?:搜索|检索)(?:一下)?[，,：:\s]+",
+        r"^(?:请)?(?:帮我|帮忙)?(?:搜索|查一下|查询|检索)[一下]?[，,：:\s]*",
+        r"^(?:请)?(?:介绍一下|介绍)[一下]?[，,：:\s]*",
+    )
+    for pat in patterns:
+        text = re.sub(pat, "", text, count=1, flags=re.IGNORECASE)
+    return text.strip() or (user_input or "").strip()
+
+
+def _looks_like_instruction(query: str) -> bool:
+    q = (query or "").strip()
+    if not q:
+        return True
+    if len(q) > 100:
+        return True
+    markers = (
+        "结合联网",
+        "联网搜索",
+        "帮我",
+        "介绍一下",
+        "请搜索",
+        "搜索一下",
+    )
+    return any(m in q for m in markers)
+
+
+def _fallback_queries(
+    user_input: str, supplement_query: str, *, max_q: int
+) -> List[str]:
+    out: List[str] = []
+    supplement = (supplement_query or "").strip()
+    if supplement:
+        out.append(supplement)
+    subject = _extract_search_subject(user_input)
+    if subject and subject not in out:
+        out.append(subject)
+    if not out:
+        out.append((user_input or "").strip())
+    deduped: List[str] = []
+    seen = set()
+    for q in out:
+        if q and q not in seen:
+            seen.add(q)
+            deduped.append(q)
+    return deduped[:max_q]
 
 
 def recognize_web_search_intent(
@@ -62,10 +164,6 @@ def recognize_web_search_intent(
         "reason": "意图识别失败，默认不检索",
         "ok": False,
     }
-    client_model = _get_llm(base_agent, config_key="search_intent_model")
-    if not client_model:
-        return default
-    client, model = client_model
     prompt = f"""你是联网检索门控助手。仅根据用户是否需要**外部时效/事实/资料**判断，不要用关键词表。
 
 当前日期（仅供判断时效，勿写入搜索词）：{_today_label()}
@@ -77,30 +175,34 @@ def recognize_web_search_intent(
 
 请只输出 JSON：
 {{
-  "need_search": true或false,
-  "search_profile": "news|fact|howto|compare 之一",
+  "need_search": true,
+  "search_profile": "fact",
   "must_include_entities": ["实体1"],
   "reason": "一句话理由"
 }}
 
 说明：
+- need_search 只能是 true 或 false（JSON 布尔值，不要写中文）
+- search_profile 只能是 news、fact、howto、compare 之一
+- reason 尽量短，不要换行，不要引号
 - 纯聊天、代码、已有文件/屏幕内容、打开网站、待办 → need_search false
 - 需要查新闻、价格、人物近况、政策、未掌握的事实 → need_search true
 """
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+        raw = _llm_text_call(
+            base_agent,
+            "search_intent_model",
+            [
                 {"role": "system", "content": "只输出合法 JSON，无 markdown。"},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=200,
-            temperature=0.1,
+            max_tokens=384,
+            temperature=0.0,
+            task_label="web_search_intent",
         )
-        raw = (resp.choices[0].message.content or "").strip()
-        raw = re.sub(r"^```\w*\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-        data = json.loads(raw)
+        if not raw:
+            raise ValueError("empty response")
+        data = _parse_json_object(raw)
         return {
             "need_search": bool(data.get("need_search", False)),
             "search_profile": str(data.get("search_profile", "fact")),
@@ -149,50 +251,52 @@ def _generate_search_queries(
 ) -> List[str]:
     max_q = int(config.get("max_search_questions", 3))
     max_q = max(1, min(6, max_q))
-    client_model = _get_llm(base_agent, config_key="ai_query_extraction_model")
-    if not client_model:
-        base = user_input.strip()
-        if supplement_query and supplement_query.strip() != base:
-            return [base, supplement_query.strip()][:max_q]
-        return [base]
-    client, model = client_model
+    supplement = (supplement_query or "").strip()
+    if supplement and not config.get("use_ai_query_extraction", True):
+        return _fallback_queries(user_input, supplement_query, max_q=max_q)
+
     entities = intent.get("must_include_entities") or []
     prompt = f"""你是搜索 query 生成助手。根据用户问题生成 {max_q} 条**相互补充**的独立搜索 query（可直接用于搜索引擎）。
 
 当前日期（仅供判断时效；**禁止**把完整日期或过时年份写进 query；需要时用「最新」「今年」「近期」）: {_today_label()}
 
 用户原问题：{user_input}
-补充说明：{supplement_query or '无'}
+框架指定核心 query（若不为「无」则第一条必须原样使用）：{supplement or '无'}
 近期对话：
 {conversation_context or '无'}
 关键实体（须在 query 中体现）：{', '.join(entities) if entities else '无'}
 
 规则：
-1. 每条 query 独立可搜，角度不同（如定义/进展/原理），不要重复
-2. 禁止「XX 知乎」「XX 百科」等站名后缀，除非用户明确要求
-3. 不要引入对话中未出现的实体
-4. 每行一条，不要编号
+1. 每条 query 应是短关键词短语，可直接用于 Bing/Google，不要整句对话
+2. 禁止把「结合联网搜索」「帮我介绍」等指令词写进 query
+3. 禁止「XX 知乎」「XX 百科」等站名后缀，除非用户明确要求
+4. 不要引入对话中未出现的实体
+5. 每行一条，不要编号
 
 只输出 query 列表："""
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+        text = _llm_text_call(
+            base_agent,
+            "ai_query_extraction_model",
+            [
                 {"role": "system", "content": "只输出搜索 query，每行一条。"},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=300,
-            temperature=0.3,
+            max_tokens=400,
+            temperature=0.2,
+            task_label="web_search_queries",
         )
-        text = (resp.choices[0].message.content or "").strip()
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         lines = [re.sub(r"^\d+[\.\)、]\s*", "", ln) for ln in lines]
+        lines = [ln for ln in lines if not _looks_like_instruction(ln)]
+        if supplement:
+            lines = [supplement] + [ln for ln in lines if ln != supplement]
         lines = lines[:max_q]
         if lines:
             return lines
     except Exception as e:
         print(f"⚠️ 生成搜索 query 失败: {e}")
-    return [user_input.strip()]
+    return _fallback_queries(user_input, supplement_query, max_q=max_q)
 
 
 def _normalize_url(url: str) -> str:
@@ -323,11 +427,6 @@ def _rerank_indices(
             f"摘要:{it.get('snippet','')[:200]} | URL:{it.get('url','')[:120]}"
         )
     listing = "\n".join(lines)
-    client_model = _get_llm(base_agent, config_key="search_rerank_model")
-    if not client_model:
-        return [it["index"] for it in items[:max_browse]]
-
-    client, model = client_model
     prompt = f"""用户问题：{user_input}
 
 以下是搜索引擎结果（方括号内为 index）。请选出最值得深度阅读的 {max_browse} 个 index。
@@ -339,19 +438,20 @@ def _rerank_indices(
 {listing}
 """
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+        raw = _llm_text_call(
+            base_agent,
+            "search_rerank_model",
+            [
                 {"role": "system", "content": "只输出 JSON。"},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=250,
-            temperature=0.1,
+            max_tokens=384,
+            temperature=0.0,
+            task_label="web_search_rerank",
         )
-        raw = (resp.choices[0].message.content or "").strip()
-        raw = re.sub(r"^```\w*\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-        data = json.loads(raw)
+        if not raw:
+            raise ValueError("empty response")
+        data = _parse_json_object(raw)
         picked = []
         for row in data.get("selected", []):
             idx = row.get("index")
