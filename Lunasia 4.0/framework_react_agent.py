@@ -306,6 +306,37 @@ class FrameworkReActAgent:
             print(f"⚠️ [屏幕上下文检查] 判断失败: {e}")
             return False
 
+    def _apply_screen_read_to_framework(
+        self, framework: List[Dict[str, Any]], user_input: str
+    ) -> List[Dict[str, Any]]:
+        """读屏：插入 analyze_screen（静默，供主 Agent 整合）；纯读屏末尾保留 pass_to_main_agent。"""
+        screen_step: Dict[str, Any] = {
+            "description": "截屏并分析当前屏幕内容以回答用户问题",
+            "action": "analyze_screen",
+            "params": {"user_question": user_input},
+        }
+        pass_step: Dict[str, Any] = {
+            "description": "将屏幕分析结果传递给主Agent回答",
+            "action": "pass_to_main_agent",
+            "params": {},
+        }
+
+        def _only_pass_to_main(steps: List[Dict[str, Any]]) -> bool:
+            return bool(steps) and all(
+                s.get("action") == "pass_to_main_agent" for s in steps
+            )
+
+        if not framework:
+            print("🖥️ [屏幕上下文] 纯读屏请求：截屏分析后交由主Agent整合")
+            return [screen_step, pass_step]
+
+        if _only_pass_to_main(framework):
+            print("🖥️ [屏幕上下文] 纯读屏请求：截屏分析后交由主Agent整合")
+            return [screen_step] + framework
+
+        print("🖥️ [屏幕上下文] 检测到读屏意图，在框架前插入截屏分析步骤")
+        return [screen_step] + framework
+
     def process_combined_command(self, user_input: str, stream_callback=None) -> str:
         """组合发送专用：自动构建框架并执行，跳过 LLM 规划。"""
         from combined_send_handler import build_combined_framework
@@ -374,6 +405,7 @@ class FrameworkReActAgent:
                 "combined_vision_video",
                 "analyze_image",
                 "analyze_video",
+                "analyze_screen",
             ) and last_params.get("direct_return", False):
                 return last_step.get("result", "")
 
@@ -462,31 +494,9 @@ class FrameworkReActAgent:
                     }
                 ] + framework
 
-        # 🔥 如果读屏意图识别为需要看屏幕，在框架前插入 analyze_screen
         if needs_screen_context:
-            print("🖥️ [屏幕上下文] 检测到读屏意图，在框架前插入截屏分析步骤")
-            if not framework:
-                framework = [
-                    {
-                        "description": "截屏并分析当前屏幕内容以回答用户问题",
-                        "action": "analyze_screen",
-                        "params": {}
-                    },
-                    {
-                        "description": "将屏幕分析结果传递给主Agent回答",
-                        "action": "pass_to_main_agent",
-                        "params": {}
-                    }
-                ]
-            else:
-                framework = [
-                    {
-                        "description": "截屏并分析当前屏幕内容以回答用户问题",
-                        "action": "analyze_screen",
-                        "params": {}
-                    }
-                ] + framework
-        
+            framework = self._apply_screen_read_to_framework(framework, user_input)
+
         if not framework:
             print("❌ 无法制定执行框架，使用标准模式")
             return None
@@ -595,7 +605,12 @@ class FrameworkReActAgent:
                 if last_params.get("direct_return", False):
                     print("🎬 [视频分析] 检测到direct_return标记，直接返回视频分析结果")
                     return last_step.get("result", "")
-        
+            elif last_step.get("action") == "analyze_screen":
+                last_params = last_step.get("params", {})
+                if last_params.get("direct_return", False):
+                    print("🖥️ [屏幕分析] 检测到direct_return标记，直接返回读屏结果")
+                    return last_step.get("result", "")
+
         final_answer = self._generate_final_answer(user_input, collected_info)
         return final_answer
     
@@ -1056,14 +1071,24 @@ class FrameworkReActAgent:
 
             elif action == "analyze_screen":
                 user_question = params.get("user_question", user_input)
+                direct_return = params.get("direct_return", False)
                 from llm_spec import vision_model_label
 
                 screen_model = vision_model_label(
                     self.base_agent.config, "vision_screen_model"
                 )
                 print(f"🖥️ [屏幕分析] 截屏并使用 {screen_model} 分析...")
-                sc = getattr(self, '_current_stream_callback', None)
-                result = self.base_agent.analyze_screen(user_question, stream_callback=sc)
+                if direct_return:
+                    print("🖥️ [屏幕分析] 标记为直接返回模式，将直接返回结果")
+                else:
+                    print("🖥️ [屏幕分析] 静默模式，结果交由后续主Agent整合输出")
+                sc = getattr(self, "_current_stream_callback", None)
+                stream_cb = sc if direct_return else None
+                result = self.base_agent.analyze_screen(
+                    user_question, stream_callback=stream_cb
+                )
+                if direct_return:
+                    return result
                 return f"屏幕分析结果：\n{result}"
             
             elif action == "analyze_video":

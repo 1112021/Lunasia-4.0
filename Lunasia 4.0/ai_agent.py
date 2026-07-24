@@ -979,14 +979,10 @@ class AIAgent:
     def _ai_identify_website_intent(self, user_input):
         """专门用于识别网页打开与自动化操作请求的AI方法"""
         try:
+            from llm_router import chat_completion
             from llm_spec import get_config_spec
 
             spec = get_config_spec(self.config, "search_intent_model")
-            result = self._get_llm_client(config_key="search_intent_model")
-            if not result:
-                print("⚠️ 无法获取LLM客户端，无法进行网页打开与自动化操作意图识别")
-                return None
-            client, model = result
             print(f"🔍 [网站意图识别] 模型: {spec.display_name()}")
             
             # 构建专门的网页打开与自动化操作识别提示词
@@ -1039,19 +1035,25 @@ class AIAgent:
 
 现在请分析上面的用户输入，只返回一行结果："""
             
-            # 调用AI进行网页打开与自动化操作意图识别
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "你是一个网页打开与自动化操作意图识别助手，专门用于判断用户是否想要打开网页或进行网页自动化操作。请严格按照格式返回结果。"},
-                    {"role": "user", "content": website_prompt}
-                ],
-                max_tokens=30,
-                temperature=0.1,
-                timeout=10
-            )
-            
-            result = response.choices[0].message.content.strip()
+            # 必须走 llm_router：DeepSeek v4 需显式 thinking=disabled，否则低 max_tokens 会把额度耗在推理上导致 content 为空
+            result = (
+                chat_completion(
+                    self.config,
+                    config_key="search_intent_model",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是一个网页打开与自动化操作意图识别助手，专门用于判断用户是否想要打开网页或进行网页自动化操作。请严格按照格式返回结果。",
+                        },
+                        {"role": "user", "content": website_prompt},
+                    ],
+                    max_tokens=64,
+                    temperature=0.1,
+                    timeout=15,
+                    task_label="website_intent",
+                )
+                or ""
+            ).strip()
             print(f"🔍 [网站意图识别] AI原始返回: '{result}'")
             print(f"🔍 [网站意图识别] 用户输入: '{user_input}'")
             
@@ -1084,14 +1086,10 @@ class AIAgent:
     def _ai_identify_app_launch_intent(self, user_input):
         """使用AI识别用户的应用启动意图"""
         try:
+            from llm_router import chat_completion
             from llm_spec import get_config_spec
 
             spec = get_config_spec(self.config, "search_intent_model")
-            result = self._get_llm_client(config_key="search_intent_model")
-            if not result:
-                print(f"⚠️ 无法获取LLM客户端，无法进行AI应用启动意图识别: {user_input}")
-                return None
-            client, model = result
             print(f"🔍 应用启动意图识别，模型: {spec.display_name()}")
             
             # 构建AI提示词，让AI智能判断用户意图类型
@@ -1125,18 +1123,24 @@ class AIAgent:
 请只返回结果，格式为：意图类型|应用名称
 """
             
-            # 调用AI
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "你是一个应用启动意图识别助手，专门用于分析用户的应用启动需求。"},
-                    {"role": "user", "content": intent_prompt}
-                ],
-                max_tokens=100,
-                temperature=0.1
-            )
-            
-            result = response.choices[0].message.content.strip()
+            result = (
+                chat_completion(
+                    self.config,
+                    config_key="search_intent_model",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是一个应用启动意图识别助手，专门用于分析用户的应用启动需求。",
+                        },
+                        {"role": "user", "content": intent_prompt},
+                    ],
+                    max_tokens=64,
+                    temperature=0.1,
+                    timeout=15,
+                    task_label="app_intent",
+                )
+                or ""
+            ).strip()
             print(f"🔍 应用启动意图识别结果: {result}")
             
             # 解析AI返回的结果
@@ -1152,17 +1156,25 @@ class AIAgent:
             print(f"AI应用启动意图识别失败: {str(e)}")
             return None
 
+    @staticmethod
+    def _screen_read_keyword_fallback(user_input: str) -> bool:
+        """明确读屏词的关键词后备，避免意图模型空返回时漏触发截屏。"""
+        text = (user_input or "").strip().lower()
+        if not text:
+            return False
+        markers = [
+            "屏幕", "读屏", "截屏", "截图", "桌面", "看屏",
+            "screen", "screenshot", "desktop",
+        ]
+        return any(m in text for m in markers)
+
     def _ai_identify_screen_read_intent(self, user_input):
         """使用AI识别用户是否有读屏/看屏幕意图（需要截屏并分析当前屏幕内容）。"""
         try:
+            from llm_router import chat_completion
             from llm_spec import get_config_spec
 
             spec = get_config_spec(self.config, "search_intent_model")
-            result = self._get_llm_client(config_key="search_intent_model")
-            if not result:
-                print("⚠️ 无法获取LLM客户端，无法进行读屏意图识别")
-                return None
-            client, model = result
             print(f"🔍 [读屏意图识别] 模型: {spec.display_name()}")
 
             intent_prompt = f"""请分析用户输入，判断是否**可能通过查看当前电脑屏幕/桌面内容**来回答（即需要截屏并识别屏幕）。标准从宽：只要有一点点相关就判为需要读屏。
@@ -1193,28 +1205,45 @@ class AIAgent:
 请只返回一行：screen_read| 或 not_screen_read|
 """
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "你是读屏意图识别助手。标准从宽：只要用户的问题可能通过看当前屏幕来回答就返回 screen_read；只有明确无关（如介绍某事物、打开软件、推荐歌、问天气等）才返回 not_screen_read。"},
-                    {"role": "user", "content": intent_prompt}
-                ],
-                max_tokens=20,
-                temperature=0.1,
-                timeout=10
-            )
-
-            result = response.choices[0].message.content.strip()
+            # DeepSeek v4 必须经 llm_router 传入 thinking=disabled；旧写法 max_tokens=20 且无
+            # extra_body 时，推理占满额度，content 为空，导致读屏永不触发。
+            result = (
+                chat_completion(
+                    self.config,
+                    config_key="search_intent_model",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是读屏意图识别助手。标准从宽：只要用户的问题可能通过看当前屏幕来回答就返回 screen_read；只有明确无关（如介绍某事物、打开软件、推荐歌、问天气等）才返回 not_screen_read。只返回一行：screen_read| 或 not_screen_read|",
+                        },
+                        {"role": "user", "content": intent_prompt},
+                    ],
+                    max_tokens=64,
+                    temperature=0.1,
+                    timeout=15,
+                    task_label="screen_intent",
+                )
+                or ""
+            ).strip()
             print(f"🔍 [读屏意图识别] 结果: {result}")
 
             if "|" in result:
                 intent_type = result.split("|", 1)[0].strip()
                 if intent_type == "screen_read":
                     return True
+                if intent_type == "not_screen_read":
+                    return None
+
+            if self._screen_read_keyword_fallback(user_input):
+                print("🔍 [读屏意图识别] AI结果无效，关键词后备判定为需要读屏")
+                return True
             return None
 
         except Exception as e:
             print(f"AI读屏意图识别失败: {str(e)}")
+            if self._screen_read_keyword_fallback(user_input):
+                print("🔍 [读屏意图识别] 异常后关键词后备判定为需要读屏")
+                return True
             return None
 
     def _extract_search_keywords(self, user_input: str) -> dict:
